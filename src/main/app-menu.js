@@ -72,8 +72,13 @@ function folderName(p) {
 // test cannot pretend to be Windows any other way. `theme` and `recents` are
 // parameters because the menu has to be rebuilt when either changes, and a
 // builder that read them itself could not be checked without a running app.
+//
+// `tabs` is this fork's workspace tabs (workspace-shell.js), null when they are
+// off — and then the template is exactly upstream's. The tab keys themselves
+// are read in main before the page sees them (tab-keys.js); the items here
+// carry the same accelerators so the menu says what the keys are.
 function buildMenuTemplate({
-  open, send, newWindow, platform = process.platform, name = 'Nami', theme = 'paper', recents = [],
+  open, send, newWindow, platform = process.platform, name = 'Nami', theme = 'paper', recents = [], tabs = null,
 } = {}) {
   const mac = platform === 'darwin';
   const cmd = (label, command, extra = {}) => ({ label, ...extra, click: () => send(command) });
@@ -105,6 +110,7 @@ function buildMenuTemplate({
   const fileSubmenu = [
     cmd('New Session', 'new-session', { accelerator: 'CommandOrControl+N' }),
     { label: 'New Window', accelerator: 'Shift+CommandOrControl+N', click: () => newWindow() },
+    ...(tabs ? [{ label: 'New Tab', accelerator: 'CommandOrControl+T', click: () => tabs.newTab() }] : []),
     SEP,
     cmd('Open Folder', 'open-folder', { accelerator: 'CommandOrControl+O' }),
     // Disabled rather than absent when there is nothing in it: a menu item that
@@ -122,6 +128,7 @@ function buildMenuTemplate({
     cmd(mac ? 'Reveal in Finder' : 'Reveal in File Explorer', 'reveal'),
     SEP,
     cmd('Close Pane', 'close-pane', { accelerator: 'CommandOrControl+W' }),
+    ...(tabs ? [{ label: 'Close Tab', accelerator: mac ? 'Shift+Command+W' : 'Control+F4', click: () => tabs.closeTab() }] : []),
     // Off macOS there is no app submenu, so File is the only place these can go.
     ...(mac ? [] : [SEP, cmd('Settings', 'settings', { accelerator: 'CommandOrControl+,' }), { role: 'quit' }]),
   ];
@@ -153,9 +160,10 @@ function buildMenuTemplate({
   // first two items in Electron's View menu, which put ⌘R one keystroke from
   // wiping the desk you are working on.
   const viewSubmenu = [
-    cmd('Sessions', 'rail:sessions', { accelerator: 'CommandOrControl+1' }),
-    cmd('Workspace', 'rail:workspace', { accelerator: 'CommandOrControl+2' }),
-    cmd('Library', 'rail:library', { accelerator: 'CommandOrControl+3' }),
+    // With tabs, ⌘1…⌘9 pick a tab and the sidebar moves one modifier over.
+    cmd('Sessions', 'rail:sessions', { accelerator: tabs ? 'Alt+CommandOrControl+1' : 'CommandOrControl+1' }),
+    cmd('Workspace', 'rail:workspace', { accelerator: tabs ? 'Alt+CommandOrControl+2' : 'CommandOrControl+2' }),
+    cmd('Library', 'rail:library', { accelerator: tabs ? 'Alt+CommandOrControl+3' : 'CommandOrControl+3' }),
     SEP,
     cmd('Toggle Sidebar', 'rail:toggle', { accelerator: 'CommandOrControl+Alt+S' }),
     SEP,
@@ -190,6 +198,21 @@ function buildMenuTemplate({
   ] : [
     { role: 'minimize' },
   ];
+  if (tabs) {
+    const list = Array.isArray(tabs.list) ? tabs.list : [];
+    windowSubmenu.push(
+      SEP,
+      { label: 'Show Next Tab', accelerator: 'Control+Tab', click: () => tabs.next() },
+      { label: 'Show Previous Tab', accelerator: 'Control+Shift+Tab', click: () => tabs.prev() },
+      ...(list.length ? [SEP] : []),
+      // ⌘1…⌘8 by position, ⌘9 the last tab: the browser convention.
+      ...list.map((t, i) => ({
+        label: t.label, type: 'checkbox', checked: !!t.active,
+        ...(i < 8 ? { accelerator: `CommandOrControl+${i + 1}` } : (i === list.length - 1 ? { accelerator: 'CommandOrControl+9' } : {})),
+        click: () => tabs.select(t.id),
+      })),
+    );
+  }
 
   // Docs first: it is the answer to the question that brings anyone here, and
   // the site has had a docs page for a while with nothing in the app pointing
@@ -302,11 +325,12 @@ function editContextTemplate(params, platform = process.platform) {
 }
 
 // The only part that touches Electron.
-function installAppMenu({ Menu, shell, app: electronApp, send, newWindow, theme, recents }) {
+function installAppMenu({ Menu, shell, app: electronApp, send, newWindow, theme, recents, tabs = null }) {
   const template = buildMenuTemplate({
     open: (url) => shell.openExternal(url),
     send,
     newWindow,
+    tabs,
     name: (electronApp && electronApp.name) || 'Nami',
     theme,
     recents,
