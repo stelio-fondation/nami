@@ -36,6 +36,7 @@ async function spawnBoundary(request, config = settings, overrides = {}) {
     oneShotArgs: () => ['-c', 'dummy-install'],
     // Module state the exit path touches; the throwing pty above never gets there.
     termSessions: new Map(), sessionOwners: new Map(), titleWatch: new Map(), deliberateKills: new Set(),
+    termActivity: { input() {}, output() {}, forget() {} },   // fork: workspace tab activity (tab-activity.js)
     exitNote: require('../src/main/exit-note').exitNote, feedRunDone: () => null, feedOscTitle: () => null,
     watchTitle() {}, startDiscovery: () => null, refreshUserPath() {},
     // Anything the handler defers (typing afterStart) runs at once, so a test
