@@ -45,7 +45,12 @@ async function paintBlank(wc, dark) {
   await wc.insertCSS(css).catch(() => {});
 }
 
-function wireBrowserViews(ipcMain, { readSettings, writeSettings }) {
+// hostFor / hostById: which Nami renderer an event came from, and which one has
+// a webContents id. A renderer is a window, or in the tabbed fork a tab hosted
+// inside one (window-host.js); the defaults are the window-only originals.
+const windowFor = (sender) => { const w = BrowserWindow.fromWebContents(sender); return w && w.webContents === sender ? w : null; };
+const windowById = (id) => BrowserWindow.getAllWindows().find((w) => !w.isDestroyed() && w.webContents.id === id) || null;
+function wireBrowserViews(ipcMain, { readSettings, writeSettings, hostFor = windowFor, hostById = windowById }) {
   // Status is polled frequently. Never turn a UI refresh into filesystem or
   // macOS privacy access; only startup and an explicit toggle touch settings.
   let browserEnabled = !!readSettings().browserEnabled;
@@ -103,7 +108,7 @@ function wireBrowserViews(ipcMain, { readSettings, writeSettings }) {
       return { copied, failed };
     }),
     onChange: (job, owner) => {
-      const w = BrowserWindow.getAllWindows().find(w => !w.isDestroyed() && w.webContents.id === owner);
+      const w = hostById(owner);
       w?.webContents.send('browser:event', { type: 'import-job', job });
     },
   });
@@ -117,7 +122,7 @@ function wireBrowserViews(ipcMain, { readSettings, writeSettings }) {
   let gateway, gatewayStarting;
   const send = (e, type, data) => { if (type !== 'closed' && views.get(e.id) !== e) return; if (!e.window.isDestroyed() && !e.window.webContents.isDestroyed()) e.window.webContents.send('browser:event', { id: e.id, type, ...data }); };
   const mainWindow = (event) => {
-    const w = BrowserWindow.fromWebContents(event.sender);
+    const w = hostFor(event.sender);
     if (!w || event.sender !== w.webContents || event.senderFrame !== w.webContents.mainFrame) throw new Error('Browser action is not from Nami.');
     return w;
   };
@@ -380,7 +385,7 @@ function wireBrowserViews(ipcMain, { readSettings, writeSettings }) {
     for (const [id, s] of access.sessions) if ([...s.views].some((viewId) => ids.has(viewId))) {
       for (const viewId of ids) s.views.delete(viewId);
       await gateway?.refresh(id);
-      const window = BrowserWindow.getAllWindows().find((w) => w.webContents.id === s.windowId);
+      const window = hostById(s.windowId);
       window?.webContents.send('browser:event', { type: 'access-revoked', sessionId: id, reason: 'Browser profile changed. Grant access again when ready.' });
     }
   }
@@ -554,11 +559,11 @@ function wireBrowserViews(ipcMain, { readSettings, writeSettings }) {
     if (!gateway) gatewayStarting = require('./browser-mcp').createBrowserMcp({ access, views, create, remove, send, contexts, images,
       onActivity: (sessionId, activity) => {
         const s = access.sessions.get(sessionId);
-        const target = s && BrowserWindow.getAllWindows().find(w => w.webContents.id === s.windowId);
+        const target = s && hostById(s.windowId);
         target?.webContents.send('browser:event', { type: 'activity', sessionId, activity });
       },
       notifyMessage: (windowId, message) => {
-        const target = BrowserWindow.getAllWindows().find(w => w.webContents.id === windowId);
+        const target = hostById(windowId);
         target?.webContents.send('browser:event', { type: 'message', ...message });
       } }).then(service => { gateway = service; return service; }).finally(() => { gatewayStarting = null; });
     return gateway || gatewayStarting;

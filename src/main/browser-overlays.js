@@ -2,16 +2,20 @@
 // never receive this channel, app markup, feedback, or input events.
 const { BrowserWindow, WebContentsView, dialog } = require('electron');
 const path = require('node:path');
-function wireBrowserOverlays(ipcMain) {
+// hostFor: the Nami renderer an event came from — a window, or in the tabbed
+// fork a tab inside one (window-host.js). Dialogs need the native window.
+const windowFor = (sender) => { const w = BrowserWindow.fromWebContents(sender); return w && w.webContents === sender ? w : null; };
+const nativeOf = (w) => (w && w.window) || w;
+function wireBrowserOverlays(ipcMain, { hostFor = windowFor } = {}) {
   const windows = new Map();
   ipcMain.handle('browser:confirm-discard', async (event, { count = 0 } = {}) => {
-    const w = BrowserWindow.fromWebContents(event.sender);
+    const w = hostFor(event.sender);
     if (!w || event.sender !== w.webContents || event.senderFrame !== w.webContents.mainFrame) return false;
-    const result = await dialog.showMessageBox(w, { type:'question', message:`Discard ${Math.max(1, Math.min(201, Number(count) || 1))} pending annotation(s)?`, detail:'These notes have not been inserted into a session.', buttons:['Keep notes','Discard'], defaultId:0, cancelId:0 });
+    const result = await dialog.showMessageBox(nativeOf(w), { type:'question', message:`Discard ${Math.max(1, Math.min(201, Number(count) || 1))} pending annotation(s)?`, detail:'These notes have not been inserted into a session.', buttons:['Keep notes','Discard'], defaultId:0, cancelId:0 });
     return result.response === 1;
   });
   ipcMain.handle('browser:overlays', async (event, payload = {}) => {
-    const w = BrowserWindow.fromWebContents(event.sender);
+    const w = hostFor(event.sender);
     if (!w || event.sender !== w.webContents || event.senderFrame !== w.webContents.mainFrame) return { ok: false };
     let records = windows.get(w);
     if (!records) {
@@ -20,7 +24,7 @@ function wireBrowserOverlays(ipcMain) {
       w.on('close', async event => {
         if(approved || !records.pendingCount)return;
         event.preventDefault(); if(asking)return; asking=true;
-        try { const result=await dialog.showMessageBox(w,{type:'question',message:'Discard pending browser annotations and close Nami?',detail:'These temporary notes have not been inserted into a session.',buttons:['Keep notes','Discard and close'],defaultId:0,cancelId:0});
+        try { const result=await dialog.showMessageBox(nativeOf(w),{type:'question',message:'Discard pending browser annotations and close Nami?',detail:'These temporary notes have not been inserted into a session.',buttons:['Keep notes','Discard and close'],defaultId:0,cancelId:0});
           if(result.response===1&&!w.isDestroyed()){approved=true;w.close();}
         } finally {asking=false;}
       });
