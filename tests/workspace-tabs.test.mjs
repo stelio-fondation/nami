@@ -285,3 +285,43 @@ test('with tabs: New Tab, Close Tab, the tab list on ⌘1…, and the sidebar on
     assert.equal(new Set(keys).size, keys.length, keys.join(' '));
   }
 });
+
+// ---- activity ------------------------------------------------------------------
+
+const { createActivityLog, tabActivity, nextAttention, QUIET_MS, ECHO_MS } = require('../src/main/tab-activity.js');
+
+test('a session that wrote recently is working; one quiet for a while is at rest', () => {
+  assert.deepEqual(tabActivity({ outputs: [], now: 10000 }), { state: 'none', live: 0, working: 0 });
+  assert.deepEqual(tabActivity({ outputs: [9000, 1000], now: 10000 }), { state: 'working', live: 2, working: 1 });
+  assert.deepEqual(tabActivity({ outputs: [10000 - QUIET_MS, 0], now: 10000 }), { state: 'idle', live: 2, working: 0 });
+});
+
+test('the echo of typing is not work', () => {
+  let t = 1000;
+  const log = createActivityLog({ now: () => t });
+  log.output('a');
+  assert.equal(log.lastOutput('a'), 1000);
+  t = 9000; log.input('a');
+  t = 9000 + ECHO_MS; log.output('a');          // echo of the key press
+  assert.equal(log.lastOutput('a'), 1000);
+  t = 9000 + ECHO_MS + 1; log.output('a');      // the agent answering
+  assert.equal(log.lastOutput('a'), 9000 + ECHO_MS + 1);
+  log.forget('a');
+  assert.equal(log.lastOutput('a'), 0);
+});
+
+test('a background tab whose work ends asks to be looked at, until it is', () => {
+  // working → at rest, elsewhere: attention
+  assert.equal(nextAttention({ previous: 'working', current: 'idle', active: false }), true);
+  // it keeps asking while nothing changes
+  assert.equal(nextAttention({ attention: true, previous: 'idle', current: 'idle', active: false }), true);
+  // looking at it clears it
+  assert.equal(nextAttention({ attention: true, previous: 'idle', current: 'idle', active: true }), false);
+  // work ending in the tab you are looking at asks for nothing
+  assert.equal(nextAttention({ previous: 'working', current: 'idle', active: true }), false);
+  // starting again, or every session closing, clears it
+  assert.equal(nextAttention({ attention: true, previous: 'idle', current: 'working', active: false }), false);
+  assert.equal(nextAttention({ attention: true, previous: 'idle', current: 'none', active: false }), false);
+  // a tab that was never working does not light up
+  assert.equal(nextAttention({ previous: 'none', current: 'idle', active: false }), false);
+});

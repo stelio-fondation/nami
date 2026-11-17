@@ -14,6 +14,14 @@
     b.toggleAttribute('data-soft', name === 'soft' || name === 'dusk');
   }
 
+  // The tooltip's second half: how many sessions, and how many are working.
+  function describe(t) {
+    if (!t.live) return '';
+    const n = `${t.live} session${t.live === 1 ? '' : 's'}`;
+    if (t.working) return ` — ${n}, ${t.working} working`;
+    return ` — ${n}, ${t.attention ? 'finished' : 'at rest'}`;
+  }
+
   let dragId = null;
   function render(state) {
     if (!state) return;
@@ -22,12 +30,16 @@
     tabsEl.textContent = '';
     for (const t of state.tabs) {
       const el = document.createElement('div');
-      el.className = 'tab' + (t.active ? ' active' : '');
+      el.className = 'tab' + (t.active ? ' active' : '') + (t.attention ? ' done' : '');
       el.setAttribute('role', 'tab');
       el.setAttribute('aria-selected', String(!!t.active));
-      el.title = t.title + (t.live ? ` — ${t.live} session${t.live === 1 ? '' : 's'} running` : '');
+      el.title = t.title + describe(t);
       el.draggable = true;
-      if (t.live) { const dot = document.createElement('span'); dot.className = 'tab-live'; el.appendChild(dot); }
+      if (t.activity === 'working' || t.activity === 'idle') {
+        const dot = document.createElement('span');
+        dot.className = 'tab-dot ' + t.activity;
+        el.appendChild(dot);
+      }
       const label = document.createElement('span');
       label.className = 'tab-label';
       label.textContent = t.label;

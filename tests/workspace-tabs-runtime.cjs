@@ -106,6 +106,21 @@ app.whenReady().then(async () => {
     await until(() => shellPage().executeJavaScript('document.body.dataset.theme === "dusk"'), 'theme reaches the bar');
     console.log('PASS: a theme change in one tab applies to the tab bar and every tab of the window.');
 
+    // A background tab whose agent goes quiet turns green, until it is visited.
+    const gammaWc = byFolder.get(folders[2]);
+    const tabState = (label) => shellPage().executeJavaScript(`(() => { const t = [...document.querySelectorAll('.tab')].find(e => e.querySelector('.tab-label').textContent === ${JSON.stringify(label)}); const d = t && t.querySelector('.tab-dot'); return t ? { done: t.classList.contains('done'), dot: d ? d.className : '' } : null; })()`);
+    await gammaWc.executeJavaScript(`dainami.termCreate(${JSON.stringify({ id: 'quiet', cwd: folders[2], kind: 'harness', program: '/bin/sh', args: ['-c', 'for n in 1 2 3; do echo busy-$n; sleep 0.4; done; sleep 30'], cols: 80, rows: 24 })})`);
+    await until(async () => (await tabState('gamma')).dot.includes('working'), 'gamma working', 100);
+    assert.equal((await tabState('gamma')).done, false);
+    await until(async () => (await tabState('gamma')).done, 'gamma turns green when quiet', 200);
+    assert.ok((await tabState('gamma')).dot.includes('idle'));
+    key(byFolder.get(folders[1]), '3', [mod]);
+    await until(async () => !(await tabState('gamma')).done, 'visiting clears it');
+    assert.ok((await tabState('gamma')).dot.includes('idle'));
+    key(gammaWc, '2', [mod]);
+    await until(async () => (await barActive()) === 'beta', 'back to beta again');
+    console.log('PASS: a working tab pulses amber, turns green in the background when its agent goes quiet, and clears once visited.');
+
     // New tab, then ⌘W on its empty desk closes it.
     key(byFolder.get(folders[1]), 'T', [mod]);
     await until(() => tabPages().length === 4, 'new tab');

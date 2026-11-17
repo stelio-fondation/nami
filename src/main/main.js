@@ -51,6 +51,8 @@ const { rememberedWindows } = require('./window-memory');
 const workspaceTabs = require('./workspace-tabs');
 const { createWorkspaceShells } = require('./workspace-shell');
 const { createHostRegistry, nativeWindow, toWindowPoint } = require('./window-host');
+// When each terminal last wrote, so a tab can say whether its agents are working.
+const termActivity = require('./tab-activity').createActivityLog();
 const { userPath, refreshUserPath } = require('./user-path');
 const { exitNote } = require('./exit-note');
 const { checkForUpdate, updateStatus } = require('./update-check');
@@ -639,6 +641,7 @@ function startWorkspaceTabs() {
     harden: lockNavigation,
     setupTab: (host, folder) => setupRenderer(host, folder),
     liveSessions: (host) => liveSessionsOf(host.webContents.id),
+    sessionOutputs: (host) => sessionsOf(host.webContents.id).map((id) => termActivity.lastOutput(id)),
     deskEmpty,
     sendCommand: (host, cmd) => sendWc(host.webContents, 'menu:command', cmd),
     onChange: () => { snapshotWindows(); refreshAppMenu(); },
@@ -650,11 +653,12 @@ function shellTheme(s) {
   const host = s && shells ? shells.activeHost(s) : null;
   return (host && windowThemes.get(host.webContents.id)) || settingsStore.normalizeTheme(readSettings().theme);
 }
-function liveSessionsOf(wcId) {
-  let n = 0;
-  for (const owner of sessionOwners.values()) if (owner === wcId) n += 1;
-  return n;
+function sessionsOf(wcId) {
+  const ids = [];
+  for (const [id, owner] of sessionOwners) if (owner === wcId) ids.push(id);
+  return ids;
 }
+function liveSessionsOf(wcId) { return sessionsOf(wcId).length; }
 // Whether a renderer's desk has no tiles, as it last told main (panels:save).
 function deskEmpty(host) {
   if (!host || !host.webContents || host.webContents.isDestroyed()) return false;
@@ -1849,6 +1853,7 @@ ipcMain.handle('term:create', async (e, { id, cwd, cols, rows, kind, command, pr
   let seedGate = null;
   p.onData((data) => {
     sendWc(wc, 'term:data', { id, data });
+    termActivity.output(id);
     if (seedGate) seedGate.onData(data);
     // The shell saying which folder it is in now. path:stat asks ptyCwd for it
     // when a relative path printed after a `cd` misses against the tile's own.
@@ -1874,7 +1879,7 @@ ipcMain.handle('term:create', async (e, { id, cwd, cols, rows, kind, command, pr
     if (seedGate) { seedGate.stop(); seedGate = null; }
     if (stopDiscovery) stopDiscovery(); // a closed tile stops polling agent stores
     if (where) ptyCwd.forget(p.pid); // Windows hands the pid to the next process
-    termSessions.delete(id); sessionOwners.delete(id); titleWatch.delete(id);
+    termSessions.delete(id); sessionOwners.delete(id); titleWatch.delete(id); termActivity.forget(id);
     // The note is built here rather than in the renderer because only main knows
     // whether this teardown was Nami's own doing.
     const deliberate = deliberateKills.delete(id);
@@ -1978,6 +1983,7 @@ ipcMain.handle('term:write', (_e, { id, data }) => {
   const p = termSessions.get(id);
   if (!p) return { ok: false };
   if (p.namiSeedGate) p.namiSeedGate.onInput(data);
+  termActivity.input(id);
   try { p.write(data); return { ok: true }; } catch (_) { return { ok: false }; }
 });
 let ptyResizeN = 0;

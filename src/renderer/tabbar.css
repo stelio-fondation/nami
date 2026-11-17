@@ -51,10 +51,25 @@ body[data-platform="win32"].is-fullscreen .tabbar { padding-right: 8px; }
   position: relative; top: 1px;   /* sits on the bar's bottom border */
 }
 .tab .tab-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.tab .tab-live {
-  width: 7px; height: 7px; border-radius: 50%; flex: none;
-  background: var(--green, #4a6b52);
+/* Session state. Fixed colours, not theme tokens: most themes repaint --green
+   as their coral action colour, and a working/done signal has to read the same
+   in every theme. */
+.tabbar { --tab-working: #e0a030; --tab-done: #3f9e63; --tab-done-tint: rgba(63, 158, 99, 0.14); }
+body[data-theme="dusk"] .tabbar, body[data-theme="graphite"] .tabbar, body[data-theme="operator"] .tabbar {
+  --tab-working: #f0b44c; --tab-done: #5cc283; --tab-done-tint: rgba(92, 194, 131, 0.18);
 }
+.tab .tab-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+.tab .tab-dot.working { background: var(--tab-working); animation: tab-pulse 1.4s ease-in-out infinite; }
+.tab .tab-dot.idle { background: var(--tab-done); }
+@keyframes tab-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.35; transform: scale(0.75); }
+}
+@media (prefers-reduced-motion: reduce) { .tab .tab-dot.working { animation: none; } }
+/* Work ended in a tab you were not looking at: it stays green until visited. */
+.tab.done { background: var(--tab-done-tint); color: var(--tab-done); box-shadow: inset 0 -2px 0 var(--tab-done); }
+.tab.done:hover { background: var(--tab-done-tint); }
+.tab.done .tab-label { font-weight: 700; }
 .tab .tab-close {
   -webkit-app-region: no-drag;
   width: 18px; height: 18px; flex: none;

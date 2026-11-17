@@ -19,7 +19,7 @@ sessions d'agents vivantes quand on passe à un autre.
   sur son propre dossier : bureau, sessions, arborescence, bibliothèque.
 - **Les sessions continuent de tourner** dans les onglets qui ne sont pas
   affichés, et leur sortie s'y accumule.
-- Un point vert sur l'onglet indique qu'il a des sessions en cours.
+- Un point sur l'onglet indique l'état de ses sessions : **ambre qui pulse** quand un agent travaille, **vert** quand toutes les sessions sont au repos. Un onglet en arrière-plan dont le travail vient de se terminer est **surligné en vert** jusqu'à ce qu'on l'ouvre. « Travaille » veut dire : le terminal a écrit dans les 4 dernières secondes (hors écho de la frappe) ; un programme qui affiche en continu semblera toujours au travail, un agent qui réfléchit sans rien afficher passera au vert trop tôt.
 - **Un dossier n'est jamais ouvert deux fois dans la même fenêtre** : demander
   un dossier déjà ouvert (Ouvrir, Récents, glisser-déposer…) bascule sur son
   onglet.

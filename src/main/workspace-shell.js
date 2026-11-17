@@ -17,6 +17,7 @@
 const { EventEmitter } = require('node:events');
 const { createTabModel, tabsFromRecord, windowRecord, tabLabel } = require('./workspace-tabs');
 const { tabKeyAction } = require('./tab-keys');
+const { tabActivity, nextAttention } = require('./tab-activity');
 
 // Tall enough for a tab you can hit and for the Windows caption buttons, which
 // the shell asks the system to draw at this height so they sit in the bar.
@@ -34,6 +35,8 @@ class TabHost extends EventEmitter {
     this.container = container;
     this.view = view;
     this.destroyed = false;
+    this.activity = 'none';     // what tab-activity.js last said
+    this.attention = false;     // work ended while you were elsewhere
   }
   get webContents() { return this.view.webContents; }
   get contentView() { return this.container; }
@@ -64,6 +67,7 @@ function createWorkspaceShells({
   harden,                   // (webContents) => lockNavigation
   setupTab,                 // (host, folder) => main's per-renderer setup; loads the page
   liveSessions = () => 0,   // (host) => how many sessions would end with it
+  sessionOutputs = () => [],// (host) => when each of its sessions last wrote
   deskEmpty = () => false,  // (host) => whether ⌘W should close the tab
   sendCommand = () => {},   // (host, command) => menu:command to a tab
   onChange = () => {},      // a tab opened, closed, moved, was activated or relabelled
@@ -280,6 +284,16 @@ function createWorkspaceShells({
   }
 
   // ---- the bar --------------------------------------------------------------
+  // Working, at rest, or done while you were looking elsewhere — see
+  // tab-activity.js. Re-read on every state push, so the timer below is what
+  // turns a quiet tab green.
+  function readActivity(shell, host) {
+    const { state, live, working } = tabActivity({ outputs: sessionOutputs(host) });
+    const active = shell.model.activeId === host.tabId;
+    host.attention = nextAttention({ attention: host.attention, previous: host.activity, current: state, active });
+    host.activity = state;
+    return { state, live, working };
+  }
   function barState(shell) {
     const activeId = shell.model.activeId;
     return {
@@ -288,7 +302,8 @@ function createWorkspaceShells({
       theme: theme(shell),
       tabs: shell.model.tabs.map((t, i) => {
         const host = shell.hosts.get(t.id);
-        return { id: t.id, label: tabLabel(t.folder), title: t.folder || 'No folder', active: t.id === activeId, live: host ? liveSessions(host) : 0, index: i };
+        const act = host ? readActivity(shell, host) : { state: 'none', live: 0, working: 0 };
+        return { id: t.id, label: tabLabel(t.folder), title: t.folder || 'No folder', active: t.id === activeId, live: act.live, working: act.working, activity: act.state, attention: !!(host && host.attention), index: i };
       }),
     };
   }
@@ -300,9 +315,9 @@ function createWorkspaceShells({
     shell.lastState = json;
     shell.window.webContents.send('tabs:state', state);
   }
-  // Session counts change in main without any tab event; a cheap look twice a
-  // second keeps the live dots honest without wiring into the pty code.
-  const badgeTimer = setInterval(() => { for (const s of shells) pushState(s); }, 1500);
+  // Session counts and activity change in main without any tab event; a cheap
+  // look every second keeps the dots honest without wiring into the pty code.
+  const badgeTimer = setInterval(() => { for (const s of shells) pushState(s); }, 1000);
   if (badgeTimer.unref) badgeTimer.unref();
 
   function fromBar(event) {
