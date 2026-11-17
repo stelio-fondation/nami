@@ -70,6 +70,10 @@ contextBridge.exposeInMainWorld('dainami', {
   // openFile is only set by the switch sheet: the desk declined to change
   // folders, so the file rides along to the window being made instead.
   newWindow: (folder, openFile) => ipcRenderer.invoke('window:new', { folder, openFile: openFile || null }),
+  // Workspace tabs (this fork): whether this page is a tab, and opening a folder
+  // in a new one. The flag rides on the command line main gives a tab's view.
+  tabs: process.argv.includes('--nami-tabs'),
+  newTab: (folder, openFile) => ipcRenderer.invoke('window:new-tab', { folder, openFile: openFile || null }),
 
   // Finder opened a file with Nami. adopt says the folder has to change first;
   // without it the file already lives on this desk. See src/main/open-with.js.

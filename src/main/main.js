@@ -2,7 +2,7 @@
 // Owns: the window, PTY terminal sessions,
 // the open folder + its .claude scan, restart-proof state, and all IPC.
 
-const { app, BrowserWindow, ipcMain: electronIpc, dialog, shell, clipboard, protocol, Menu, nativeImage } = require('electron');
+const { app, BrowserWindow, View, WebContentsView, ipcMain: electronIpc, dialog, shell, clipboard, protocol, Menu, nativeImage } = require('electron');
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
@@ -46,6 +46,11 @@ const { migrateRecents, sortRecents, rememberFolderIn, setPinnedIn, removeFrom }
 const { windowChrome, paneShell, scriptArgs, spawnPlan } = require('./platform');
 const { seedStartHere } = require('./start-here');
 const { rememberedWindows } = require('./window-memory');
+// Workspace tabs (this fork): see workspace-shell.js. Off, Nami is the classic
+// window-per-folder app and none of these are reached.
+const workspaceTabs = require('./workspace-tabs');
+const { createWorkspaceShells } = require('./workspace-shell');
+const { createHostRegistry, nativeWindow, toWindowPoint } = require('./window-host');
 const { userPath, refreshUserPath } = require('./user-path');
 const { exitNote } = require('./exit-note');
 const { checkForUpdate, updateStatus } = require('./update-check');
@@ -167,6 +172,16 @@ const wins = new Set();           // every open window — each is its own proje
 const { trustedAppSender, trustedIpc } = require('./trusted-ipc');
 const appDocumentUrl = require('node:url').pathToFileURL(path.join(__dirname, '..', 'renderer', 'index.html')).href;
 const ipcMain = trustedIpc(electronIpc, event => trustedAppSender(event, wins, appDocumentUrl));
+// `wins` holds renderers, not native windows: a BrowserWindow in the classic
+// mode, a tab in the tabbed one (window-host.js). hostFor maps an IPC sender to
+// its renderer; ownerWindow to the native window a dialog or menu needs.
+const hosts = createHostRegistry({ BrowserWindow });
+const hostFor = (sender) => hosts.hostFor(sender);
+const ownerWindow = (sender) => hosts.ownerWindow(sender) || nativeWindow(win);
+// Decided once, at whenReady, before the first window: a Nami that changed mode
+// halfway through would have windows of both kinds.
+let TABS = false;
+let shells = null;
 // Only the guest modules receive raw events, and each checks its exact sender.
 const browserIpc = { handle: ipcMain.handle, on: electronIpc.on.bind(electronIpc) };
 const windowThemes = new Map();
@@ -313,17 +328,30 @@ function broadcastRecents() {
 // window and not all of them: two windows are two project spaces, and ⌘N in one
 // must not open a launcher in the other. `win` is the fallback for the moment
 // between a window closing and the next taking focus.
+//
+// With tabs, "the window you are looking at" is the active tab of the focused
+// window: two tabs are two project spaces exactly as two windows are.
+function focusedRenderer() {
+  if (TABS && shells) {
+    const host = shells.activeHost(shells.focusedShell());
+    if (host) return host;
+  }
+  return BrowserWindow.getFocusedWindow() || win;
+}
 function menuSend(cmd) {
-  const w = BrowserWindow.getFocusedWindow() || win;
+  const w = focusedRenderer();
+  // Close Pane on an empty desk closes the tab (the keyboard path is tab-keys.js).
+  if (TABS && cmd === 'close-pane' && w && deskEmpty(w)) { shells.closeTab(w); return; }
   if (w) sendWc(w.webContents, 'menu:command', cmd);
 }
-function refreshAppMenu(focusedWindow = BrowserWindow.getFocusedWindow() || win) {
+function refreshAppMenu(focusedWindow = focusedRenderer()) {
   installAppMenu({
     Menu,
     shell,
     app,
     send: menuSend,
     newWindow: () => createWindow(null),
+    tabs: TABS && shells ? { list: shells.menuTabs(), ...shells.menuActions() } : null,
     theme: windowThemes.get(focusedWindow?.webContents.id) || settingsStore.normalizeTheme(readSettings().theme),
     // A recents row can outlive its folder, and a menu item that opens nothing
     // is worse than one that is not there.
@@ -364,6 +392,8 @@ function startUpdatePolling() {
 let winSnapTimer = null;
 let lastClosedWindow = null;        // see window-memory.js: off the Mac, closing the last window is quitting
 function openWindowRecords() {
+  // A tabbed window is one record carrying its tabs (workspace-tabs.js).
+  if (TABS && shells) return shells.records();
   return [...wins].filter((w) => !w.isDestroyed()).map((w) => ({
     folder: winFolders.get(w.webContents.id) || null,
     bounds: w.getNormalBounds(),
@@ -411,15 +441,15 @@ app.on('open-file', (e, filePath) => {
 function routeOpenFile(filePath) {
   if (!filePath || !opensHere(filePath)) return;
   const live = [...wins].filter((w) => !w.isDestroyed());
-  const focused = BrowserWindow.getFocusedWindow() || win;
+  const focused = focusedRenderer();
   const target = chooseTarget({
     filePath,
     windows: live.map((w) => ({ id: w.webContents.id, folder: winFolders.get(w.webContents.id) || null })),
     focusedId: focused && !focused.isDestroyed() ? focused.webContents.id : null,
   });
-  if (target.action === 'new-window') { sendOpen(createWindow(target.folder), filePath, target.folder, false); return; }
+  if (target.action === 'new-window') { sendOpen(newDesk(target.folder), filePath, target.folder, false); return; }
   const w = live.find((x) => x.webContents.id === target.id);
-  if (!w) { sendOpen(createWindow(target.folder), filePath, target.folder, false); return; }
+  if (!w) { sendOpen(newDesk(target.folder), filePath, target.folder, false); return; }
   if (w.isMinimized()) w.restore();
   w.focus();
   sendOpen(w, filePath, target.folder, target.action === 'adopt');
@@ -432,7 +462,7 @@ function routeOpenFile(filePath) {
 // was opened, so a launch that asked for nothing can just bring Nami forward.
 function routeOpenFolder(folder) {
   const live = [...wins].filter((w) => !w.isDestroyed());
-  const focused = BrowserWindow.getFocusedWindow() || win;
+  const focused = focusedRenderer();
   const target = chooseFolderTarget({
     folder,
     windows: live.map((w) => ({ id: w.webContents.id, folder: winFolders.get(w.webContents.id) || null })),
@@ -442,12 +472,12 @@ function routeOpenFolder(folder) {
     // The new window first, in the old one's place, so there is never a moment
     // with no windows — which off a Mac is the moment Nami quits.
     const old = live.find((x) => x.webContents.id === target.id);
-    createWindow(folder, old ? old.getNormalBounds() : undefined);
+    if (TABS) newDesk(folder); else createWindow(folder, old ? old.getNormalBounds() : undefined);
     if (old && !old.isDestroyed()) old.close();
     return;
   }
   const w = target.action === 'here' ? live.find((x) => x.webContents.id === target.id) : null;
-  if (!w) { createWindow(folder); return; }
+  if (!w) { newDesk(folder); return; }
   if (w.isMinimized()) w.restore();
   w.focus();
 }
@@ -487,7 +517,26 @@ function sendOpen(w, filePath, folder, adopt) {
   else send();
 }
 
+// A desk for a folder that is not this one: a new window in the classic mode;
+// with tabs, a tab in the window you are looking at — or the tab that already
+// has that folder, since a window never shows one folder twice.
+function newDesk(folder) {
+  if (!TABS) return createWindow(folder);
+  return openInTab(folder).host;
+}
+function openInTab(folder, inShell) {
+  const s = inShell || shells.focusedShell();
+  if (!s) return { host: createWindow(folder || null), existed: false };
+  const res = shells.openTab(s, folder || null);
+  if (!s.window.isDestroyed()) { if (s.window.isMinimized()) s.window.restore(); s.window.focus(); }
+  return res;
+}
+
 function createWindow(folder, bounds) {
+  if (TABS) {
+    const s = shells.createWindow({ bounds, tabs: [{ folder: folder === undefined ? state.currentFolder : folder }] });
+    return shells.activeHost(s);
+  }
   const w = new BrowserWindow({
     // The floor is what the layout survives, not what looks best: below 560 the
     // tile head runs out of room even with its controls dropped. Nami is often a
@@ -500,40 +549,17 @@ function createWindow(folder, bounds) {
     backgroundColor: settingsStore.themeBackground(readSettings().theme),
     webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false, sandbox: true, plugins: true },
   });
-  browserViews.bindWindow(w);
   const wcId = w.webContents.id;
-  wins.add(w); win = w;
-  windowThemes.set(wcId, settingsStore.normalizeTheme(readSettings().theme));
-  w.on('focus', () => refreshAppMenu(w));
-  winFolders.set(wcId, folder === undefined ? state.currentFolder : folder);
-  lockNavigation(w.webContents);
-  w.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'));
+  setupRenderer(w, folder === undefined ? state.currentFolder : folder);
   w.on('resize', snapshotWindows);
   w.on('move', snapshotWindows);
   // Native fullscreen hides the traffic lights, so the renderer collapses the
   // deck it reserves for them; it needs to hear both edges of the transition.
   w.on('enter-full-screen', () => w.webContents.send('window:fullscreen', true));
   w.on('leave-full-screen', () => w.webContents.send('window:fullscreen', false));
-  // Windows only, and only where the page has not answered the right-click
-  // itself: Cut, Copy and Paste by mouse, which on a Mac is the Edit menu.
-  w.webContents.on('context-menu', (_e, params) => {
-    const template = editContextTemplate(params);
-    // At the click, which the event reports, rather than wherever the pointer
-    // is by the time this runs — the two differ whenever the click was not made
-    // by the pointer: a touch, a pen, a screen reader, an automated test.
-    if (template) Menu.buildFromTemplate(template).popup({ window: w, x: params.x, y: params.y });
-  });
   // Read while the window still exists: by 'closed' its bounds and its folder
   // are both gone, and on Windows that is the moment they are needed most.
   w.on('close', () => { lastClosedWindow = { folder: winFolders.get(wcId) || null, bounds: w.getNormalBounds() }; });
-  w.on('closed', () => {
-    wins.delete(w);
-    windowThemes.delete(wcId);
-    winFolders.delete(wcId);
-    reapSessions(wcId);
-    if (win === w) win = [...wins].pop() || null;
-    snapshotWindows();
-  });
   snapshotWindows();
 
   if (SHOT_PATH && wins.size === 1) {
@@ -562,6 +588,80 @@ function createWindow(folder, bounds) {
   return w;
 }
 
+// Everything one Nami renderer needs, whether it is a window of its own or a
+// tab inside one (`w` is then a tab host, see workspace-shell.js): its folder,
+// its theme, the browser panes, the page, and the cleanup when it goes.
+function setupRenderer(w, folder) {
+  browserViews.bindWindow(w);
+  const wcId = w.webContents.id;
+  wins.add(w); win = w;
+  hosts.register(w);
+  windowThemes.set(wcId, settingsStore.normalizeTheme(readSettings().theme));
+  w.on('focus', () => refreshAppMenu(w));
+  winFolders.set(wcId, folder);
+  lockNavigation(w.webContents);
+  w.webContents.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'));
+  // Windows only, and only where the page has not answered the right-click
+  // itself: Cut, Copy and Paste by mouse, which on a Mac is the Edit menu.
+  w.webContents.on('context-menu', (_e, params) => {
+    const template = editContextTemplate(params);
+    // At the click, which the event reports, rather than wherever the pointer
+    // is by the time this runs — the two differ whenever the click was not made
+    // by the pointer: a touch, a pen, a screen reader, an automated test.
+    // A tab's page starts below the tab bar, so the point moves down with it.
+    const at = toWindowPoint(w, { x: params.x, y: params.y });
+    if (template) Menu.buildFromTemplate(template).popup({ window: nativeWindow(w), x: at.x, y: at.y });
+  });
+  w.on('closed', () => {
+    wins.delete(w);
+    windowThemes.delete(wcId);
+    winFolders.delete(wcId);
+    reapSessions(wcId);
+    if (win === w) win = [...wins].pop() || null;
+    snapshotWindows();
+  });
+  snapshotWindows();
+}
+
+// What a tabbed window asks of main: everything else it does on its own.
+function startWorkspaceTabs() {
+  shells = createWorkspaceShells({
+    electron: { BrowserWindow, View, WebContentsView, dialog, ipcMain: electronIpc },
+    files: {
+      tabbarHtml: path.join(__dirname, '..', 'renderer', 'tabbar.html'),
+      tabbarPreload: path.join(__dirname, 'tabbar-preload.js'),
+      appPreload: path.join(__dirname, 'preload.js'),
+    },
+    // A window wears its active tab's theme; a window with no tab yet, the saved one.
+    theme: (s) => shellTheme(s),
+    chrome: (s) => windowChrome(process.platform, settingsStore.themeBackground(shellTheme(s))),
+    background: (s) => settingsStore.themeBackground(shellTheme(s)),
+    harden: lockNavigation,
+    setupTab: (host, folder) => setupRenderer(host, folder),
+    liveSessions: (host) => liveSessionsOf(host.webContents.id),
+    deskEmpty,
+    sendCommand: (host, cmd) => sendWc(host.webContents, 'menu:command', cmd),
+    onChange: () => { snapshotWindows(); refreshAppMenu(); },
+    onBounds: snapshotWindows,
+    onWindowClose: (record) => { lastClosedWindow = record; },
+  });
+}
+function shellTheme(s) {
+  const host = s && shells ? shells.activeHost(s) : null;
+  return (host && windowThemes.get(host.webContents.id)) || settingsStore.normalizeTheme(readSettings().theme);
+}
+function liveSessionsOf(wcId) {
+  let n = 0;
+  for (const owner of sessionOwners.values()) if (owner === wcId) n += 1;
+  return n;
+}
+// Whether a renderer's desk has no tiles, as it last told main (panels:save).
+function deskEmpty(host) {
+  if (!host || !host.webContents || host.webContents.isDestroyed()) return false;
+  const id = host.webContents.id;
+  return panelsFor(winFolders.has(id) ? winFolders.get(id) : null).length === 0;
+}
+
 // A closing window takes its live sessions with it (same as quit does for all).
 function reapSessions(wcId) {
   for (const [id, owner] of [...sessionOwners]) {
@@ -573,6 +673,9 @@ function reapSessions(wcId) {
 
 app.whenReady().then(() => {
   loadState();
+  // Before the menu, which grows tab items in this mode.
+  TABS = workspaceTabs.tabsEnabled({ env: process.env, settings: readSettings(), forcedOff: !!(SHOT_PATH || DEMO) });
+  if (TABS) startWorkspaceTabs();
   // Before any window: the menu belongs to the app, and setting it after a
   // window exists makes the first one flash the stock menu bar.
   refreshAppMenu();
@@ -606,7 +709,8 @@ app.whenReady().then(() => {
   // Screenshot and demo runs want exactly one predictable window, never the
   // desk the developer happened to leave open.
   const restore = (!SHOT_PATH && !DEMO && state.windows.length) ? state.windows.slice(0, 8) : null;
-  if (restore) for (const w of restore) createWindow(w.folder || null, w.bounds);
+  if (restore && TABS) for (const w of restore) shells.createWindow({ bounds: w.bounds, ...workspaceTabs.tabsFromRecord(w) });
+  else if (restore) for (const w of restore) createWindow(w.folder || null, w.bounds);
   // `Nami.exe C:\work` with nothing to restore: that folder is the window, so
   // the usual one on the last-used folder would only be a second, unasked-for.
   else if (!LAUNCH.folders.length) createWindow();
@@ -675,11 +779,11 @@ app.on('quit', () => {
 // collide with the sessions it just left behind.
 let bootSeq = 0;
 
-const browserViews = wireBrowserViews(browserIpc, { readSettings, writeSettings });
-const browserOverlays = require('./browser-overlays').wireBrowserOverlays(browserIpc);
+const browserViews = wireBrowserViews(browserIpc, { readSettings, writeSettings, hostFor, hostById: (id) => hosts.hostById(id) });
+const browserOverlays = require('./browser-overlays').wireBrowserOverlays(browserIpc, { hostFor });
 let usagePending;
 ipcMain.handle('usage:read', async (e) => {
-  const w = BrowserWindow.fromWebContents(e.sender);
+  const w = hostFor(e.sender);
   if (!w || e.sender !== w.webContents) return { accounts: [] };
   if (usagePending) return usagePending;
   usagePending = (async () => {
@@ -767,6 +871,16 @@ ipcMain.handle('recents:remove', (_e, p) => {
   return recentsForRenderer();
 });
 
+// The switch sheet's "new tab": the folder opens beside this tab, in this
+// window, or in the tab that already has it. Classic mode has no tabs, so the
+// request becomes the new window it would have been.
+ipcMain.handle('window:new-tab', (e, args) => {
+  const folder = (args && args.folder) || null;
+  const host = hostFor(e.sender);
+  const w = TABS && shells ? openInTab(folder, shells.shellOf(host)).host : createWindow(folder);
+  if (args && args.openFile) sendOpen(w, args.openFile, folder, false);
+  return { ok: true };
+});
 ipcMain.handle('window:new', (_e, args) => {
   const folder = (args && args.folder) || null;
   const w = createWindow(folder);
@@ -780,12 +894,13 @@ ipcMain.handle('window:new', (_e, args) => {
 // live (app-menu.js says which, and why). The renderer sends where the mark is
 // in its own pixels; a zoomed page has bigger pixels than the window does.
 ipcMain.handle('menu:extras', (e, at) => {
-  const w = BrowserWindow.fromWebContents(e.sender);
+  const w = hostFor(e.sender);
   if (process.platform !== 'win32' || !w) return { ok: false };
   const zoom = e.sender.getZoomFactor();
   const px = (v) => Math.max(0, Math.round((Number(v) || 0) * zoom));
+  const point = toWindowPoint(w, { x: px(at && at.x), y: px(at && at.y) });
   Menu.buildFromTemplate(buildWindowsExtrasTemplate({ open: (url) => shell.openExternal(url) }))
-    .popup({ window: w, x: px(at && at.x), y: px(at && at.y) });
+    .popup({ window: nativeWindow(w), x: point.x, y: point.y });
   return { ok: true };
 });
 
@@ -979,7 +1094,7 @@ ipcMain.handle('services:connect', async (_e, { id, values, scope, agentIds, pro
 // Both end at the same place as the catalog — a master entry, delivered.
 const { parseManifest, userConfigFields, buildEntry, parseCommandLine } = require('./mcpb');
 ipcMain.handle('services:pickBundle', async (e) => {
-  const parent = BrowserWindow.fromWebContents(e.sender) || win;
+  const parent = ownerWindow(e.sender);
   const res = await dialog.showOpenDialog(parent, {
     properties: ['openFile'], title: 'Choose a bundle',
     filters: [{ name: 'MCP bundle', extensions: ['mcpb', 'zip'] }],
@@ -1071,9 +1186,24 @@ ipcMain.handle('url:open', (_e, url) => {
 
 // Theme lives in settings.json so the window background matches on next launch.
 ipcMain.on('theme:applied', (e, theme) => {
-  const w = BrowserWindow.fromWebContents(e.sender);
+  const w = hostFor(e.sender);
   if (!wins.has(w)) return;
-  windowThemes.set(e.sender.id, settingsStore.normalizeTheme(theme));
+  const name = settingsStore.normalizeTheme(theme);
+  windowThemes.set(e.sender.id, name);
+  if (TABS && shells && shells.shellOf(w)) {
+    // One window, one look: the bar and every other tab follow. Each tab's
+    // theme is written down before it is told, so its own theme:applied
+    // finds nothing left to relay and the round trip ends there.
+    const s = shells.shellOf(w);
+    for (const other of shells.hostsOf(s)) {
+      if (other === w || other.isDestroyed() || windowThemes.get(other.webContents.id) === name) continue;
+      windowThemes.set(other.webContents.id, name);
+      sendWc(other.webContents, 'menu:command', 'theme:' + name);
+    }
+    shells.applyTheme(s);
+    refreshAppMenu();
+    return;
+  }
   // The Windows caption buttons are painted by the system on a colour we chose
   // at creation, so a theme change has to repaint them or they stay behind.
   const overlay = windowChrome(process.platform, settingsStore.themeBackground(theme)).titleBarOverlay;
@@ -1146,7 +1276,7 @@ ipcMain.handle('settings:set', (_e, patch) => {
 });
 
 ipcMain.handle('folder:pick', async (e) => {
-  const parent = BrowserWindow.fromWebContents(e.sender) || win;
+  const parent = ownerWindow(e.sender);
   // createDirectory is what puts macOS's own New Folder button in the panel.
   // Without it the one user who most needs to make a folder -- somebody with no
   // project at all, sent here by the empty desk -- lands in a picker that can
@@ -1156,6 +1286,9 @@ ipcMain.handle('folder:pick', async (e) => {
     title: 'Open a folder',
   });
   if (res.canceled || !res.filePaths[0]) return null;
+  // A folder another tab of this window already has: go there instead. null
+  // is what the renderer gets for a cancelled pick, so the desk is left alone.
+  if (switchedToTabWith(e, res.filePaths[0])) return null;
   // Deliberately does NOT commit: the renderer may still decide this folder
   // belongs in a new window instead. It commits with folder:open.
   return scanFolder(res.filePaths[0]);
@@ -1169,7 +1302,7 @@ ipcMain.handle('folder:pick', async (e) => {
 // Returns the same shape as folder:pick, so the renderer hands it to the switch
 // path it already has and nothing downstream knows the difference.
 ipcMain.handle('folder:make', async (e) => {
-  const parent = BrowserWindow.fromWebContents(e.sender) || win;
+  const parent = ownerWindow(e.sender);
   const res = await dialog.showSaveDialog(parent, {
     title: 'Where should Nami work?',
     defaultPath: path.join(app.getPath('documents'), 'Nami'),
@@ -1189,12 +1322,23 @@ ipcMain.handle('folder:make', async (e) => {
   return scanFolder(res.filePath);
 });
 
+// With tabs, one window never shows a folder twice: asking this tab for a
+// folder another tab has switches to that tab. Returns whether it did.
+function switchedToTabWith(e, folder) {
+  if (!TABS || !shells) return false;
+  const other = shells.otherTabWith(hostFor(e.sender), folder);
+  if (!other) return false;
+  other.focus();
+  return true;
+}
+
 // Adopting a folder is what makes it this window's folder, bumps it up Recents
 // and marks the window for restore. It is separate from *reading* a folder
 // because a switch can still be called off — a desk with live sessions gets
 // offered a new window instead, and a cancelled switch must leave no trace.
 function commitFolder(e, folder) {
   winFolders.set(e.sender.id, folder);
+  if (TABS && shells) shells.folderChanged(hostFor(e.sender), folder);
   rememberFolder(folder);
   snapshotWindows();
 }
@@ -1205,6 +1349,8 @@ ipcMain.handle('folder:open', (e, arg) => {
   // null the renderer can only turn into a silent no-op.
   if (!folder) return { missing: true, path: folder };
   if (!fs.existsSync(folder)) { broadcastRecents(); return { missing: true, path: folder }; }
+  // Only the read: a commit is the end of a switch already under way.
+  if (!commit && switchedToTabWith(e, folder)) return null;
   if (commit) commitFolder(e, folder);
   return scanFolder(folder);
 });
@@ -1423,7 +1569,7 @@ ipcMain.handle('dir:watch', (e, a) => {
 // Plain directory dialog for Move to…: unlike folder:pick it must NOT remember
 // the choice as a recent project.
 ipcMain.handle('folder:choose', async (e) => {
-  const parent = BrowserWindow.fromWebContents(e.sender) || win;
+  const parent = ownerWindow(e.sender);
   const res = await dialog.showOpenDialog(parent, { properties: ['openDirectory'], title: 'Move to which folder?' });
   return res.canceled || !res.filePaths[0] ? null : res.filePaths[0];
 });
