@@ -6862,19 +6862,22 @@ function renderSwitchChoice() {
       ${esc(info.name)} here would leave ${live.length === 1 ? 'it' : 'them'} running with no window to watch from.</div>
     <div class="sw-list">${rows}${more}</div>
     <div class="sw-acts">
-      <button class="btn btn--go" id="sw-win">⧉ Open ${esc(info.name)} in a new window</button>
+      ${api.tabs ? `<button class="btn btn--go" id="sw-tab">⊞ Open ${esc(info.name)} in a new tab</button>` : ''}
+      <button class="btn${api.tabs ? '' : ' btn--go'}" id="sw-win">⧉ Open ${esc(info.name)} in a new window</button>
       <button class="btn" id="sw-stay">Stay here</button>
     </div>
     <div class="sw-hint">${esc(info.name)} opens with its own desk. Nothing here is touched.</div>`);
   // The file follows the folder: it was opened for that folder, not this desk.
   q('#sw-win', modal).onclick = () => { const file = S.pendingOpen; S.pendingOpen = null; closeOverlay(); api.newWindow(info.path, file); };
+  // Workspace tabs (fork): a tab beside this one is the default way out.
+  if (api.tabs) q('#sw-tab', modal).onclick = () => { const file = S.pendingOpen; S.pendingOpen = null; closeOverlay(); api.newTab(info.path, file); };
   q('#sw-stay', modal).onclick = () => {
     // Staying means the file is not opened. Say so — a Finder double-click that
     // visibly does nothing reads as a broken app.
     if (S.pendingOpen) { toast(baseNameOf(S.pendingOpen) + ' stayed closed — this desk has work running.'); S.pendingOpen = null; }
     closeOverlay();
   };
-  q('#sw-win', modal).focus();
+  q(api.tabs ? '#sw-tab' : '#sw-win', modal).focus();
 }
 
 function applyProject(info) {
