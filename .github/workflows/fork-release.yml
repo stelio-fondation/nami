@@ -92,7 +92,7 @@ jobs:
           Non signé : SmartScreen affiche « Windows a protégé votre ordinateur » → Informations complémentaires → Exécuter quand même.
           N'acceptez pas les mises à jour proposées dans l'application : elles réinstalleraient le Nami officiel, sans les onglets.
 
-          Détails : [FORK.md](https://github.com/$env:GH_REPO/blob/$env:SHA/FORK.md)
+          Détails : [docs/FORK.md](https://github.com/$env:GH_REPO/blob/$env:SHA/docs/FORK.md)
           "@
           if ($env:REF_TYPE -eq 'tag') {
             gh release create $env:REF_NAME @files --verify-tag --title "Nami onglets $env:REF_NAME" --notes $notes

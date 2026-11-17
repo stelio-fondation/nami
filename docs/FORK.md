@@ -107,7 +107,7 @@ entre guillemets : `npm run dist:win "--" --x64`.
 
 ## Publication automatique
 
-Le workflow [`.github/workflows/fork-release.yml`](.github/workflows/fork-release.yml)
+Le workflow [`.github/workflows/fork-release.yml`](../.github/workflows/fork-release.yml)
 construit l'installeur Windows x64 (installeur + portable) sur un runner
 Windows, après `npm ci` et `npm test` :
 
