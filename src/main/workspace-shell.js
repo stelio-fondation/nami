@@ -21,6 +21,7 @@ const { tabKeyAction } = require('./tab-keys');
 // Tall enough for a tab you can hit and for the Windows caption buttons, which
 // the shell asks the system to draw at this height so they sit in the bar.
 const BAR_HEIGHT = 36;
+const DEBUG = /^(1|true|on)$/i.test(String(process.env.NAMI_TABS_DEBUG || ''));
 // The renderer's own deck for the traffic lights / caption buttons. The bar
 // holds them now, so a tab drawing the deck too would leave an empty strip.
 const TAB_CSS = '.lights-deck{display:none!important}';
@@ -110,14 +111,17 @@ function createWorkspaceShells({
     show(shell);
 
     w.on('resize', () => { layout(shell); onBounds(shell); });
+    // Windows can change the client area without a 'resize' the views see in
+    // time (maximize, restore from minimized, snap): lay out again on each.
+    for (const ev of ['maximize', 'unmaximize', 'restore', 'show', 'ready-to-show']) w.on(ev, () => layout(shell));
     w.on('move', () => onBounds(shell));
     w.on('focus', () => {
       lastFocused = shell;
       const host = activeHost(shell);
       if (host) { host.webContents.focus(); host.emit('focus'); }
     });
-    w.on('enter-full-screen', () => { shell.fullscreen = true; pushState(shell, true); });
-    w.on('leave-full-screen', () => { shell.fullscreen = false; pushState(shell, true); });
+    w.on('enter-full-screen', () => { shell.fullscreen = true; layout(shell); pushState(shell, true); });
+    w.on('leave-full-screen', () => { shell.fullscreen = false; layout(shell); pushState(shell, true); });
     w.on('close', (event) => {
       if (shell.closeApproved) return;
       // A tab can hold the window open (pending browser annotations): ask each.
@@ -167,12 +171,30 @@ function createWorkspaceShells({
 
   function layout(shell) {
     if (shell.window.isDestroyed()) return;
-    const { width, height } = shell.window.getContentBounds();
+    // The content size, not getContentBounds: that one is in screen space and
+    // can lag a maximize on Windows; the size is what the views fill.
+    const [width, height] = shell.window.getContentSize();
     const h = Math.max(0, height - shell.barHeight);
     for (const host of shell.hosts.values()) {
       host.container.setBounds({ x: 0, y: shell.barHeight, width, height: h });
       host.view.setBounds({ x: 0, y: 0, width, height: h });
     }
+    if (DEBUG) debugLayout(shell);
+  }
+  // NAMI_TABS_DEBUG=1: what the window and each tab think their geometry is,
+  // for chasing a layout that only goes wrong on one platform.
+  function debugLayout(shell) {
+    setTimeout(async () => {
+      if (shell.window.isDestroyed()) return;
+      const w = shell.window;
+      const out = { content: w.getContentBounds(), window: w.getBounds(), maximized: w.isMaximized(), barZoom: w.webContents.getZoomFactor(), tabs: [] };
+      for (const host of shell.hosts.values()) {
+        let page = null;
+        try { page = await host.webContents.executeJavaScript('({ inner: [innerWidth, innerHeight], scroll: [scrollX, scrollY, document.scrollingElement.scrollTop], dpr: devicePixelRatio, body: document.body.getBoundingClientRect().toJSON() })'); } catch (e) { page = String(e.message); }
+        out.tabs.push({ id: host.tabId, visible: host.container.getVisible(), container: host.container.getBounds(), view: host.view.getBounds(), zoom: host.webContents.getZoomFactor(), page });
+      }
+      console.log('[tabs] layout ' + JSON.stringify(out));
+    }, 1500);
   }
 
   // Exactly one tab visible: the active one. Focus follows, so the keys go
