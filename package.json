@@ -65,5 +65,9 @@
     "@huggingface/transformers": {
       "sharp": "$sharp"
     }
+  },
+  "allowScripts": {
+    "onnxruntime-node@1.21.0": true,
+    "protobufjs@7.6.5": true
   }
 }
