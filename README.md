@@ -1,3 +1,6 @@
+> **Fork « onglets multi-workspace »** — cette version de Nami ouvre plusieurs dossiers dans une seule fenêtre, un par onglet.
+> Ce qui change, comment l'installer et le suivre : **[FORK.md](FORK.md)** · **[↓ Installeur Windows du fork](https://github.com/stelio-fondation/nami/releases/download/latest/Nami-Setup-x64.exe)**
+
 <div align="center">
 
 # Nami

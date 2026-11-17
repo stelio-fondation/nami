@@ -1,0 +1,105 @@
+# Fork (stelio-fondation/nami) : construit l'installeur Windows et le publie.
+#
+#   push sur master  -> remplace la pré-release « latest »
+#   tag tabs-v*      -> crée une release versionnée
+#
+# Fichier propre au fork : les workflows de l'upstream (windows.yml, release.yml)
+# ne sont pas modifiés. Les tags sont en tabs-v* et non v* pour ne pas
+# déclencher release.yml, qui construit et signe la version Mac officielle.
+name: fork-release
+
+on:
+  push:
+    branches: [master]
+    tags: ['tabs-v*']
+  workflow_dispatch:
+
+concurrency:
+  group: fork-release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    timeout-minutes: 45
+    steps:
+      - run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Cache Whisper weights
+        uses: actions/cache@v4
+        with:
+          path: build/models
+          key: whisper-${{ runner.os }}-${{ hashFiles('scripts/fetch-model.mjs', 'src/main/stt-model.js') }}
+
+      - run: npm ci
+
+      - run: npm test
+
+      # Informatif : échoue aujourd'hui à cause des dépendances de l'upstream.
+      - name: Dependency audit (informational)
+        continue-on-error: true
+        run: npm run check:security
+
+      # predist:win télécharge le modèle Whisper et copie le runtime C++.
+      - name: Build the installer and the portable app (unsigned)
+        shell: pwsh
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        run: |
+          npm run dist:win -- --x64
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Check what is inside the app
+        run: node scripts/check-bundle.mjs
+
+      - name: Keep what was built
+        uses: actions/upload-artifact@v4
+        with:
+          name: Nami-fork-windows-x64
+          path: release/*.exe
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Publish the release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+        run: |
+          $files = @(Get-ChildItem release/*.exe | ForEach-Object { $_.FullName })
+          if (-not $files.Count) { throw 'No installer in release/.' }
+          $short = $env:SHA.Substring(0, 7)
+          $notes = @"
+          Nami avec les onglets multi-workspace (fork stelio-fondation/nami), commit $short.
+
+          - **Nami-Setup-x64.exe** : installeur (remplace le Nami officiel, réglages conservés).
+          - **Nami-Portable-x64.exe** : version portable, sans installation.
+
+          Non signé : SmartScreen affiche « Windows a protégé votre ordinateur » → Informations complémentaires → Exécuter quand même.
+          N'acceptez pas les mises à jour proposées dans l'application : elles réinstalleraient le Nami officiel, sans les onglets.
+
+          Détails : [FORK.md](https://github.com/$env:GH_REPO/blob/$env:SHA/FORK.md)
+          "@
+          if ($env:REF_TYPE -eq 'tag') {
+            gh release create $env:REF_NAME @files --verify-tag --title "Nami onglets $env:REF_NAME" --notes $notes
+          } else {
+            # Une seule pré-release « latest », refaite à chaque push sur master.
+            gh release view latest *> $null
+            if ($LASTEXITCODE -eq 0) { gh release delete latest --yes --cleanup-tag }
+            gh release create latest @files --prerelease --target $env:SHA --title "Dernière version (master @ $short)" --notes $notes
+          }
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
